@@ -9,6 +9,7 @@ Always use the wrapper; a bare `gradle` resolves a different version on this mac
 - Build (compiles + tests): `./gradlew build`
 - All tests: `./gradlew test`
 - One test class: `./gradlew test --tests "jvacloud.spring_boot_kotlin_template.OpenApiDocumentationTests"`
+- Architecture tests: `./gradlew test --tests "jvacloud.spring_boot_kotlin_template.ArchitectureTest"`
 - Run app: `./gradlew bootRun` — actuator at `/actuator/health`, OpenAPI at `/v3/api-docs`, Swagger UI at `/swagger-ui.html`. No `management.*` config exists yet.
 
 ## Coverage (JaCoCo)
@@ -35,6 +36,14 @@ Adding the Boot 3 names pulls in a duplicate legacy stack.
 ## Springdoc is pinned by hand
 
 `springdoc-openapi-starter-webmvc-ui:3.1.1` is explicit because the Spring Boot BOM does not manage it, and the 2.x line targets Boot 3. Don't drop the version or "fix" it to 2.x. `OpenApiDocumentationTests` fails if `/v3/api-docs` stops responding, so a Boot upgrade that breaks springdoc surfaces as a test failure.
+
+## ArchUnit is pinned by hand
+
+`com.tngtech.archunit:archunit-junit6:1.5.1` is explicit because the Spring Boot BOM does not manage ArchUnit. Use the **junit6** artifact: Boot 4 runs JUnit 6, and `archunit-junit5` targets the previous platform.
+
+`ArchitectureTest` encodes the dependency rule: `domain` must not depend on `infrastructure`, `infrastructure.provider` must not depend on `domain`, use cases stay within `domain`, and `infrastructure.entrypoint` must not depend on `adapter`/`provider`. Every rule uses `allowEmptyShould(true)` because those packages are still empty; removing it makes the test fail with "failed to check any classes" until real classes exist.
+
+Kotlin rules must be static fields for the engine to discover them: keep each `@ArchTest` in a `companion object` with `@JvmField`; a plain `val` in the class body is an instance property and is ignored. Run them with `./gradlew test --tests "*ArchitectureTest"`.
 
 ## Package name is intentionally odd
 
