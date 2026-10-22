@@ -1,7 +1,7 @@
 ---
 name: kotlin-backend
 description: Write, refactor and review Kotlin/Spring Boot backend code following hexagonal architecture, constructor injection, coroutines and virtual threads, kotlin-test + JUnit 5 and explicit error handling.
-version: 0.1.0
+version: 0.2.0
 tags: [kotlin, backend, spring, guidelines]
 ---
 
@@ -44,7 +44,7 @@ This skill defines how the AI agent should write, refactor and review Kotlin cod
   - **Domain (Core):** entities, value objects, domain services and domain exceptions — pure Kotlin, no framework types.
   - **Domain Use Cases:** use-case interfaces and implementations. Orchestrate domain objects and call gateways.
   - **Domain Gateways:** interfaces (outbound ports) for external resources like repositories and email services.
-  - **Infrastructure (Adapters):** implementations of gateways (`drivenAdapters`) and REST controllers (`entryPoints`). Keep them under `infrastructure`.
+  - **Infrastructure (Adapters):** inbound adapters (`entrypoint`), outbound adapters (`adapter`) and technical clients (`provider`). Keep them under `infrastructure`.
   - **Framework & Drivers:** Spring, JPA, web servers, DB drivers — outermost layer only.
 
 - Dependency rule: code dependencies point inward. Inner layers (domain, use cases) must not depend on adapters or framework types.
@@ -52,22 +52,31 @@ This skill defines how the AI agent should write, refactor and review Kotlin cod
 - Use cases and gateways:
   - **Use cases (domain layer):** interfaces and implementations that orchestrate business logic (e.g., `CreateUserUseCase`, `CreateUserUseCaseImpl`).
   - **Gateways (domain layer):** interfaces for external resources (e.g., `UserGateway`, `EmailGateway`).
-  - Infrastructure adapters live in `infrastructure.drivenAdapters.*` and implement the gateway interfaces.
-  - Entry points live in `infrastructure.entryPoints.*` and call use-case interfaces.
+  - Outbound adapters live in `infrastructure.adapter.*`, implement the gateway interfaces and translate between domain and technical types.
+  - Technical clients live in `infrastructure.provider.*` and must not import `domain` types.
+  - Entry points live in `infrastructure.entrypoint.*` and call use-case interfaces.
+
+- Adapter vs provider:
+  - `adapter` implements a gateway and may import `domain`; it owns the mapping between domain and technical types.
+  - `provider` is a framework client (JPA, Elasticsearch, REST, SMTP, S3) and must not import `domain`.
+  - Create a provider only when it is reused by two or more adapters or isolates a framework you may replace. Otherwise, let the adapter use the framework directly.
 
 - Mapping and boundaries:
   - Keep DTOs, REST models and mappers inside adapter layers; convert to/from domain objects at the boundary.
   - Do not leak framework types (`@Entity`, `HttpServletRequest`, `Page`) into `domain` or `usecase` packages.
   - Use Kotlin extension functions for mapping (`fun UserEntity.toDomain() = ...`), not mappers that depend on Spring.
 
-- Example package layout:
-  - `com.example.domain.model` — entities, value objects, domain exceptions
+- Example package layout (lowercase and singular):
+  - `com.example.domain.model` — entities and value objects
+  - `com.example.domain.exception` — domain exceptions
   - `com.example.domain.usecase` — use-case interfaces and implementations
   - `com.example.domain.gateway` — outbound port interfaces
-  - `com.example.infrastructure.drivenAdapters` — gateway implementations (JPA, email, security)
-  - `com.example.infrastructure.providers` — technical providers (JPA entities, SMTP clients, BCrypt)
-  - `com.example.infrastructure.entryPoints` — controllers, request/response DTOs and mappers
+  - `com.example.infrastructure.entrypoint` — inbound adapters (controllers, DTOs, mappers)
+  - `com.example.infrastructure.adapter` — gateway implementations (JPA, email, security)
+  - `com.example.infrastructure.provider` — technical clients (Spring Data repositories, entities, SMTP, Elasticsearch, REST, S3)
   - `com.example.infrastructure.config` — bean configuration
+
+- **Terminology note:** `entrypoint` and `provider` are project conventions, not canonical terms. Hexagonal calls them driving adapters and driven adapters; Clean Architecture calls the outer ring Frameworks & Drivers.
 
 - Minimal layout:
 
@@ -75,19 +84,20 @@ This skill defines how the AI agent should write, refactor and review Kotlin cod
 src/main/kotlin/com/example
   /domain
     /model
+    /exception
     /usecase
     /gateway
   /infrastructure
-    /drivenAdapters
-    /providers
-    /entryPoints
+    /entrypoint
+    /adapter
+    /provider
     /config
 src/test/kotlin/com/example
 ```
 
 - Minimal ASCII diagram:
 
-  [Entry Points (REST)] -> [Use Case Interface] -> [Use Case Implementation] -> [Gateway Interface] -> [Driven Adapters (DB/External)]
+  [Entrypoint (REST)] -> [Use Case] -> [Gateway] -> [Adapter] -> [Provider]
 
 ---
 
@@ -144,10 +154,10 @@ interface CreateUserUseCase {
 }
 
 // domain/usecase/CreateUserUseCaseImpl.kt
-class CreateUserUseCaseImpl(private val repository: UserGateway) : CreateUserUseCase {
+class CreateUserUseCaseImpl(private val gateway: UserGateway) : CreateUserUseCase {
 	override fun create(command: CreateUserCommand): Long {
 		val user = User.of(command.name, command.email)
-		return repository.save(user).id
+		return gateway.save(user).id
 	}
 }
 
@@ -245,19 +255,19 @@ class CreateUserUseCaseTest {
 
 When asked to implement or modify code, the agent must return a short checklist containing:
 
-1. Affected layer(s) (entryPoints/usecase/domain.model/gateway/drivenAdapters)
+1. Affected layer(s) (entrypoint/usecase/domain.model/domain.gateway/adapter/provider)
 2. Chosen abstraction(s) and DTOs/entities
 3. Design validation vs. the rules above (list any rule exceptions)
 4. Use cases and gateways affected, mapper responsibilities (DTO -> domain)
-5. Dependency validation: confirm no inward dependencies are violated
+5. Dependency validation: confirm no inward dependencies are violated, and that `provider` does not import `domain`
 6. Concurrency choice: virtual threads or coroutines, and how context is propagated
 
 Example response the agent must produce before code:
 
 ```
-Layer: domain/usecase + infrastructure/drivenAdapters
+Layer: domain/usecase + infrastructure/adapter/jpa
 Abstraction: CreateUserUseCase (interface + implementation) + UserGatewayAdapter
-Validation: constructor injection, domain layer untouched, function length <= 30
+Validation: constructor injection, domain layer untouched, provider has no domain types, function length <= 30
 Concurrency: virtual threads (blocking JPA), no ThreadLocal handoff
 ```
 
@@ -270,95 +280,76 @@ If a request violates the rules, explain why and propose an alternative.
 ### Hexagonal Architecture - Detailed Structure
 
 ```text
-user-management/
-├── applications/
-│   └── app-service/
-│       └── src/main/kotlin/com/example/
-│           └── MainApplication.kt
-│
-├── domain/
-│   ├── model/
+src/main/kotlin/com/example
+├── MainApplication.kt
+├── domain
+│   ├── model
 │   │   ├── User.kt
-│   │   ├── Email.kt
-│   │   └── exception/
-│   │       ├── UserNotFoundException.kt
-│   │       └── InvalidEmailException.kt
-│   │
-│   ├── usecase/
+│   │   └── Email.kt
+│   ├── exception
+│   │   ├── UserNotFoundException.kt
+│   │   └── InvalidEmailException.kt
+│   ├── usecase
 │   │   ├── CreateUserUseCase.kt
 │   │   ├── GetUserUseCase.kt
-│   │   ├── UpdateUserUseCase.kt
-│   │   └── DeleteUserUseCase.kt
-│   │
-│   └── gateway/
+│   │   └── CreateUserUseCaseImpl.kt
+│   └── gateway
 │       ├── UserGateway.kt
 │       ├── EmailGateway.kt
 │       └── PasswordEncoderGateway.kt
-│
-└── infrastructure/
-    ├── drivenAdapters/
-    │   ├── jpaRepository/
-    │   │   ├── UserRepositoryAdapter.kt
-    │   │   └── mapper/
-    │   │       └── UserMapper.kt
-    │   │
-    │   ├── emailSender/
-    │   │   └── EmailServiceAdapter.kt
-    │   │
-    │   └── security/
-    │       └── PasswordEncoderAdapter.kt
-    │
-    ├── providers/
-    │   ├── jpa/
-    │   │   ├── UserJpaRepository.kt
-    │   │   ├── entities/
-    │   │   │   └── UserEntity.kt
-    │   │   └── config/
-    │   │       └── JpaConfig.kt
-    │   │
-    │   ├── smtp/
-    │   │   ├── SmtpClient.kt
-    │   │   └── config/
-    │   │       └── EmailConfig.kt
-    │   │
-    │   └── bcrypt/
-    │       └── BCryptProvider.kt
-    │
-    ├── entryPoints/
-    │   └── apiRest/
+└── infrastructure
+    ├── entrypoint
+    │   └── rest
     │       ├── UserController.kt
-    │       ├── exception/
+    │       ├── exception
     │       │   └── ApiExceptionHandler.kt
-    │       ├── dto/
+    │       ├── dto
     │       │   ├── CreateUserRequest.kt
     │       │   ├── UpdateUserRequest.kt
     │       │   └── UserResponse.kt
-    │       └── mapper/
+    │       └── mapper
     │           └── UserDtoMapper.kt
-    │
-    └── config/
+    ├── adapter
+    │   ├── jpa
+    │   │   ├── UserRepositoryAdapter.kt
+    │   │   └── mapper
+    │   │       └── UserMapper.kt
+    │   ├── email
+    │   │   └── EmailAdapter.kt
+    │   └── security
+    │       └── PasswordEncoderAdapter.kt
+    ├── provider
+    │   ├── jpa
+    │   │   ├── UserJpaRepository.kt
+    │   │   └── entity
+    │   │       └── UserEntity.kt
+    │   └── smtp
+    │       └── SmtpClient.kt
+    └── config
         └── BeanConfiguration.kt
 ```
 
-Sample flow (entryPoints -> use case -> gateway -> drivenAdapters):
+In a multi-module build, each top-level folder (`domain`, `infrastructure`) can become a Gradle module with its own `src/main/kotlin` and `build.gradle.kts`.
+
+Sample flow (entrypoint -> use case -> gateway -> adapter -> provider):
 
 ```kotlin
 // domain/usecase/CreateUserCommand.kt
 data class CreateUserCommand(val name: String, val email: String)
 
-// infrastructure/entryPoints/apiRest/dto/CreateUserRequest.kt
+// infrastructure/entrypoint/rest/dto/CreateUserRequest.kt
 data class CreateUserRequest(
 	@field:NotBlank val name: String,
 	@field:Email val email: String,
 )
 
-// infrastructure/entryPoints/apiRest/mapper/UserDtoMapper.kt
+// infrastructure/entrypoint/rest/mapper/UserDtoMapper.kt
 @Component
 class UserDtoMapper {
 	fun toCommand(request: CreateUserRequest) = CreateUserCommand(request.name, request.email)
 }
 
-// infrastructure/drivenAdapters/jpaRepository/UserRepositoryAdapter.kt
+// infrastructure/adapter/jpa/UserRepositoryAdapter.kt
 @Component
 class UserRepositoryAdapter(
 	private val jpaRepository: UserJpaRepository,
@@ -372,7 +363,7 @@ class UserRepositoryAdapter(
 		jpaRepository.findById(id).map(mapper::toDomain).orElse(null)
 }
 
-// infrastructure/drivenAdapters/jpaRepository/mapper/UserMapper.kt
+// infrastructure/adapter/jpa/mapper/UserMapper.kt
 @Component
 class UserMapper {
 	fun toEntity(user: User) = UserEntity(name = user.name, email = user.email.value)
@@ -417,18 +408,19 @@ class ArchitectureTest {
 
 	@ArchTest
 	val domainShouldNotDependOnInfrastructure: ArchRule =
-		classes().that().resideInAPackage("..domain..")
+		noClasses().that().resideInAPackage("..domain..")
+			.should().dependOnClassesThat().resideInAPackage("..infrastructure..")
+
+	@ArchTest
+	val useCasesShouldOnlyDependOnDomain: ArchRule =
+		classes().that().resideInAPackage("..domain.usecase..")
 			.should().onlyDependOnClassesThat()
 			.resideInAnyPackage("..domain..", "java..", "kotlin..", "org.slf4j..")
 
 	@ArchTest
-	val drivenAdaptersShouldImplementGateways: ArchRule =
-		classes().that().resideInAPackage("..infrastructure.drivenAdapters..")
-			.should().implement(
-				DescribedPredicate.describe("gateway interfaces") { cls ->
-					cls.packageName.contains("domain.gateway")
-				}
-			)
+	val providersShouldNotDependOnDomain: ArchRule =
+		noClasses().that().resideInAPackage("..infrastructure.provider..")
+			.should().dependOnClassesThat().resideInAPackage("..domain..")
 }
 ```
 
@@ -439,6 +431,7 @@ class ArchitectureTest {
 ## Transactions & AOP
 
 - Apply `@Transactional` and cross-cutting concerns at the use-case implementation, not in controllers.
+- Repositories under `infrastructure.provider` already manage their own transactions; do not spread `@Transactional` across providers.
 - Kotlin `@Transactional` on an `open` class or an interface implementation: remember that Spring AOP needs a proxy. Classes are `final` by default; the `kotlin("plugin.spring")` plugin opens `@Component`-annotated classes, but classes annotated only with `@Transactional` may need `@Component` or `allOpen`.
 - Use aspects sparingly, only for genuine cross-cutting concerns.
 
@@ -452,4 +445,5 @@ class ArchitectureTest {
 
 ## Change log
 
+- 0.2.0: Lowercase singular packages (`entrypoint`, `adapter`, `provider`), adapter/provider boundary rule and ArchUnit provider rule
 - 0.1.0: Initial Kotlin adaptation of the java-backend skill
