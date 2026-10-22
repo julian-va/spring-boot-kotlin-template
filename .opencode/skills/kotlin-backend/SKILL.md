@@ -1,7 +1,7 @@
 ---
 name: kotlin-backend
 description: Write, refactor and review Kotlin/Spring Boot backend code following hexagonal architecture, constructor injection, coroutines and virtual threads, kotlin-test + JUnit 5 and explicit error handling.
-version: 0.2.1
+version: 0.2.2
 tags: [kotlin, backend, spring, guidelines]
 ---
 
@@ -415,32 +415,89 @@ jobs:
 
 ---
 
-## Architecture verification (optional)
+## Architecture verification (ArchUnit)
 
-- **ArchUnit** works with Kotlin classes. Remember that Kotlin classes depend on the stdlib (`kotlin..`, `kotlin.jvm.internal..`), so the allowed packages must include it.
+- The template ships `ArchitectureTest` in `src/test/kotlin`, with the dependency rule encoded as tests.
+- ArchUnit is test-only. The Spring Boot BOM does not manage it, so the version is pinned:
+  `testImplementation("com.tngtech.archunit:archunit-junit6:1.5.1")`
+  Use `archunit-junit6`, not `archunit-junit5`: Spring Boot 4 runs JUnit 6.
+- Kotlin fields must be static for the ArchUnit engine to discover them. Put each rule in a `companion object` with `@JvmField`; a plain `val` in the class body is an instance property and the engine ignores it.
+- `@AnalyzeClasses` points at the base package and excludes test classes:
+  `@AnalyzeClasses(packages = ["com.example"], importOptions = [ImportOption.DoNotIncludeTests::class])`
+  In this template the base package is `jvacloud.spring_boot_kotlin_template`.
+- Add `.allowEmptyShould(true)` to every rule while the target packages are empty. Without it ArchUnit fails with "failed to check any classes"; once a class exists, the rule is enforced normally.
+- Run only the architecture tests: `./gradlew test --tests "*ArchitectureTest"`.
+
+Rules that encode the dependency rule:
+
+- `domain` must not depend on `infrastructure`.
+- `infrastructure.provider` must not depend on `domain` (a provider is a technical client).
+- `domain.usecase` may only depend on `domain`, the JDK, the Kotlin stdlib, SLF4J and Spring stereotype/transaction annotations.
+- `infrastructure.entrypoint` must not depend on `adapter` or `provider` (controllers call use cases).
+- `adapter` is the only layer allowed to depend on both `domain` and `provider`.
 
 ```kotlin
-@AnalyzeClasses(packages = "com.example")
+import com.tngtech.archunit.core.importer.ImportOption
+import com.tngtech.archunit.junit.AnalyzeClasses
+import com.tngtech.archunit.junit.ArchTest
+import com.tngtech.archunit.lang.ArchRule
+import com.tngtech.archunit.lang.syntax.ArchRuleDefinition.classes
+import com.tngtech.archunit.lang.syntax.ArchRuleDefinition.noClasses
+
+@AnalyzeClasses(
+    packages = ["com.example"],
+    importOptions = [ImportOption.DoNotIncludeTests::class],
+)
 class ArchitectureTest {
 
-	@ArchTest
-	val domainShouldNotDependOnInfrastructure: ArchRule =
-		noClasses().that().resideInAPackage("..domain..")
-			.should().dependOnClassesThat().resideInAPackage("..infrastructure..")
+    companion object {
 
-	@ArchTest
-	val useCasesShouldOnlyDependOnDomain: ArchRule =
-		classes().that().resideInAPackage("..domain.usecase..")
-			.should().onlyDependOnClassesThat()
-			.resideInAnyPackage("..domain..", "java..", "kotlin..", "org.slf4j..")
+        @JvmField
+        @ArchTest
+        val domainShouldNotDependOnInfrastructure: ArchRule =
+            noClasses()
+                .that().resideInAPackage("..domain..")
+                .should().dependOnClassesThat().resideInAPackage("..infrastructure..")
+                .allowEmptyShould(true)
 
-	@ArchTest
-	val providersShouldNotDependOnDomain: ArchRule =
-		noClasses().that().resideInAPackage("..infrastructure.provider..")
-			.should().dependOnClassesThat().resideInAPackage("..domain..")
+        @JvmField
+        @ArchTest
+        val useCasesShouldOnlyDependOnDomain: ArchRule =
+            classes()
+                .that().resideInAPackage("..domain.usecase..")
+                .should().onlyDependOnClassesThat()
+                .resideInAnyPackage(
+                    "..domain..",
+                    "java..",
+                    "kotlin..",
+                    "org.slf4j..",
+                    "org.springframework.stereotype..",
+                    "org.springframework.transaction.annotation..",
+                )
+                .allowEmptyShould(true)
+
+        @JvmField
+        @ArchTest
+        val providersShouldNotDependOnDomain: ArchRule =
+            noClasses()
+                .that().resideInAPackage("..infrastructure.provider..")
+                .should().dependOnClassesThat().resideInAPackage("..domain..")
+                .allowEmptyShould(true)
+
+        @JvmField
+        @ArchTest
+        val entrypointsShouldNotDependOnAdaptersOrProviders: ArchRule =
+            noClasses()
+                .that().resideInAPackage("..infrastructure.entrypoint..")
+                .should().dependOnClassesThat()
+                .resideInAnyPackage("..infrastructure.adapter..", "..infrastructure.provider..")
+                .allowEmptyShould(true)
+    }
 }
 ```
 
+- Read failures as dependency directions: the message names the origin class, the target class and the offending call or field. Move the behaviour to the correct layer (for example, a controller calls a use case, never a provider) instead of weakening the rule or expanding its allowlist.
+- To prove a rule is active, temporarily add a class that violates it and confirm the test fails; delete the class afterwards.
 - **Konsist** is a Kotlin-native alternative that understands declarations, annotations and file structure; prefer it for new architecture rules.
 
 ---
@@ -462,6 +519,7 @@ class ArchitectureTest {
 
 ## Change log
 
+- 0.2.2: ArchUnit in the template (`archunit-junit6`), Kotlin `companion object` + `@JvmField` setup and the four dependency rules with `allowEmptyShould(true)`
 - 0.2.1: Require explicit types and block-bodied functions (no `fun f() = ...` expression bodies)
 - 0.2.0: Lowercase singular packages (`entrypoint`, `adapter`, `provider`), adapter/provider boundary rule and ArchUnit provider rule
 - 0.1.0: Initial Kotlin adaptation of the java-backend skill
