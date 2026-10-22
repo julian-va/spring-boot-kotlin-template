@@ -1,7 +1,7 @@
 ---
 name: kotlin-backend
 description: Write, refactor and review Kotlin/Spring Boot backend code following hexagonal architecture, constructor injection, coroutines and virtual threads, kotlin-test + JUnit 5 and explicit error handling.
-version: 0.2.0
+version: 0.2.1
 tags: [kotlin, backend, spring, guidelines]
 ---
 
@@ -64,7 +64,7 @@ This skill defines how the AI agent should write, refactor and review Kotlin cod
 - Mapping and boundaries:
   - Keep DTOs, REST models and mappers inside adapter layers; convert to/from domain objects at the boundary.
   - Do not leak framework types (`@Entity`, `HttpServletRequest`, `Page`) into `domain` or `usecase` packages.
-  - Use Kotlin extension functions for mapping (`fun UserEntity.toDomain() = ...`), not mappers that depend on Spring.
+  - Use Kotlin extension functions for mapping (`fun UserEntity.toDomain(): User { return ... }`), not mappers that depend on Spring.
 
 - Example package layout (lowercase and singular):
   - `com.example.domain.model` — entities and value objects
@@ -104,6 +104,11 @@ src/test/kotlin/com/example
 ## Kotlin Language Rules
 
 - **Nullability is part of the type.** Never use `!!`. Use `requireNotNull`, `?:`, `?.let` or early returns.
+- **Explicit types always.** Declare the type of function parameters, return types and local `val`/`var`; do not rely on type inference. Omit `: Unit` only for functions that return nothing.
+  - `val user: User = User.of(command.name, command.email)` — not `val user = ...`
+  - `fun findById(id: Long): User?` — never omit the return type.
+- **Block bodies for functions.** Do not use expression-bodied functions (`fun name(): String = "..."`); always use a block with an explicit `return`.
+  - `fun name(): String { return "..." }` — not `fun name(): String = "..."`
 - **No `lateinit`** outside tests and framework-required cases.
 - **Data classes** for DTOs and value objects. They generate `equals`, `hashCode`, `toString` and `copy` — do not reimplement them.
   - Do **not** use a data class for a JPA entity: Hibernate needs a no-arg constructor and mutable state. Use a normal class with `var` fields and `@Entity`.
@@ -140,8 +145,9 @@ class UserController(
 
 	@PostMapping
 	@ResponseStatus(HttpStatus.CREATED)
-	fun create(@Valid @RequestBody request: CreateUserRequest): Map<String, Long> =
-		mapOf("id" to createUser.create(mapper.toCommand(request)))
+	fun create(@Valid @RequestBody request: CreateUserRequest): Map<String, Long> {
+		return mapOf("id" to createUser.create(mapper.toCommand(request)))
+	}
 }
 ```
 
@@ -156,7 +162,7 @@ interface CreateUserUseCase {
 // domain/usecase/CreateUserUseCaseImpl.kt
 class CreateUserUseCaseImpl(private val gateway: UserGateway) : CreateUserUseCase {
 	override fun create(command: CreateUserCommand): Long {
-		val user = User.of(command.name, command.email)
+		val user: User = User.of(command.name, command.email)
 		return gateway.save(user).id
 	}
 }
@@ -220,14 +226,14 @@ Use a sealed result when the caller must handle every outcome; use exceptions fo
 ```kotlin
 class CreateUserUseCaseTest {
 
-	private val repository = mockk<UserGateway>()
-	private val useCase = CreateUserUseCaseImpl(repository)
+	private val repository: UserGateway = mockk<UserGateway>()
+	private val useCase: CreateUserUseCase = CreateUserUseCaseImpl(repository)
 
 	@Test
 	fun `creates a user and returns its id`() {
 		every { repository.save(any()) } returns User(1, "Alice", "a@example.com")
 
-		val id = useCase.create(CreateUserCommand("Alice", "a@example.com"))
+		val id: Long = useCase.create(CreateUserCommand("Alice", "a@example.com"))
 
 		assertEquals(1, id)
 		verify(exactly = 1) { repository.save(any()) }
@@ -248,6 +254,8 @@ class CreateUserUseCaseTest {
 - No `System.out.println` / `println` in production code
 - No God classes, magic numbers or business logic in static/companion utilities
 - No mutable `var` in DTOs when `val` is enough
+- No expression-bodied functions (`fun f() = ...`)
+- No inferred types in declarations (`val x = ...`, omitted return types)
 
 ---
 
@@ -346,7 +354,9 @@ data class CreateUserRequest(
 // infrastructure/entrypoint/rest/mapper/UserDtoMapper.kt
 @Component
 class UserDtoMapper {
-	fun toCommand(request: CreateUserRequest) = CreateUserCommand(request.name, request.email)
+	fun toCommand(request: CreateUserRequest): CreateUserCommand {
+		return CreateUserCommand(request.name, request.email)
+	}
 }
 
 // infrastructure/adapter/jpa/UserRepositoryAdapter.kt
@@ -356,18 +366,25 @@ class UserRepositoryAdapter(
 	private val mapper: UserMapper,
 ) : UserGateway {
 
-	override fun save(user: User): User =
-		mapper.toDomain(jpaRepository.save(mapper.toEntity(user)))
+	override fun save(user: User): User {
+		return mapper.toDomain(jpaRepository.save(mapper.toEntity(user)))
+	}
 
-	override fun findById(id: Long): User? =
-		jpaRepository.findById(id).map(mapper::toDomain).orElse(null)
+	override fun findById(id: Long): User? {
+		return jpaRepository.findById(id).map(mapper::toDomain).orElse(null)
+	}
 }
 
 // infrastructure/adapter/jpa/mapper/UserMapper.kt
 @Component
 class UserMapper {
-	fun toEntity(user: User) = UserEntity(name = user.name, email = user.email.value)
-	fun toDomain(entity: UserEntity) = User.of(entity.name, entity.email)
+	fun toEntity(user: User): UserEntity {
+		return UserEntity(name = user.name, email = user.email.value)
+	}
+
+	fun toDomain(entity: UserEntity): User {
+		return User.of(entity.name, entity.email)
+	}
 }
 ```
 
@@ -445,5 +462,6 @@ class ArchitectureTest {
 
 ## Change log
 
+- 0.2.1: Require explicit types and block-bodied functions (no `fun f() = ...` expression bodies)
 - 0.2.0: Lowercase singular packages (`entrypoint`, `adapter`, `provider`), adapter/provider boundary rule and ArchUnit provider rule
 - 0.1.0: Initial Kotlin adaptation of the java-backend skill
